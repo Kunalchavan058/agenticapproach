@@ -25,7 +25,7 @@ EMBEDDING_KEY = os.environ.get("AZURE_OPENAI_EMBEDDING_KEY", OPENAI_KEY)
 EMBEDDING_MODEL = os.environ.get("AZURE_OPENAI_EMBEDDING_DEPLOYMENT", os.environ["AZURE_AI_EMBEDDING_MODEL"])
 CHAT_MODEL = os.environ["AZURE_AI_MODEL_DEPLOYMENT_NAME"]
 
-INDEX_NAME = "annual-reports-index"
+DEFAULT_INDEX_NAME = "annual-reports-index"
 TOP_K = 15 # number of chunks to retrieve
 
 
@@ -120,13 +120,13 @@ def build_prompt(query: str, chunks: list[dict]) -> list[dict]:
     ]
 
 
-def ask(query: str) -> str:
+def ask(query: str, index_name: str = DEFAULT_INDEX_NAME) -> str:
     """Full RAG pipeline: search -> build prompt -> generate answer."""
-    result = ask_with_metadata(query)
+    result = ask_with_metadata(query, index_name=index_name)
     return result["answer"]
 
 
-def ask_with_metadata(query: str) -> dict:
+def ask_with_metadata(query: str, index_name: str = DEFAULT_INDEX_NAME) -> dict:
     """Full RAG pipeline returning answer + metadata for the UI."""
     import time
     start = time.time()
@@ -134,7 +134,7 @@ def ask_with_metadata(query: str) -> dict:
     embedding_client = get_embedding_client()
     chat_client = get_chat_client()
     search_client = SearchClient(
-        SEARCH_ENDPOINT, INDEX_NAME, AzureKeyCredential(SEARCH_KEY)
+        SEARCH_ENDPOINT, index_name, AzureKeyCredential(SEARCH_KEY)
     )
 
     # 1. Retrieve relevant chunks

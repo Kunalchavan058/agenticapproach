@@ -27,7 +27,7 @@ EMBEDDING_KEY = os.environ.get("AZURE_OPENAI_EMBEDDING_KEY", os.environ["AZURE_O
 EMBEDDING_MODEL = os.environ.get("AZURE_OPENAI_EMBEDDING_DEPLOYMENT", os.environ["AZURE_AI_EMBEDDING_MODEL"])
 CHAT_MODEL = os.environ.get("AZURE_OPENAI_RESPONSES_DEPLOYMENT", os.environ["AZURE_AI_MODEL_DEPLOYMENT_NAME"])
 
-INDEX_NAME = "annual-reports-index"
+DEFAULT_INDEX_NAME = "annual-reports-index"
 TOP_K = 8
 MAX_TOOL_ROUNDS = 8
 
@@ -208,13 +208,13 @@ def _create_response(client: AzureOpenAI, **kwargs):
         raise
 
 
-def ask(query: str) -> str:
+def ask(query: str, index_name: str = DEFAULT_INDEX_NAME) -> str:
     """Run the Responses-based agentic RAG pipeline."""
-    result = ask_with_metadata(query)
+    result = ask_with_metadata(query, index_name=index_name)
     return result["answer"]
 
 
-def ask_with_metadata(query: str) -> dict:
+def ask_with_metadata(query: str, index_name: str = DEFAULT_INDEX_NAME) -> dict:
     """Run native Responses tool-calling RAG and return answer + metadata."""
     global _tool_call_log
     _tool_call_log = []
@@ -222,7 +222,7 @@ def ask_with_metadata(query: str) -> dict:
     started = time.time()
     embedding_client = get_embedding_client()
     responses_client = get_responses_client()
-    search_client = SearchClient(SEARCH_ENDPOINT, INDEX_NAME, AzureKeyCredential(SEARCH_KEY))
+    search_client = SearchClient(SEARCH_ENDPOINT, index_name, AzureKeyCredential(SEARCH_KEY))
 
     input_items: list = [{"role": "user", "content": query}]
     response = None

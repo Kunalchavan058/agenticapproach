@@ -13,3 +13,16 @@ wheels/
 .env
 .env.*
 ! .env.example
+
+# Data files (PDFs, JSON, etc.)
+*.pdf
+*.json
+pdfs/
+aragdoc/
+doc_intel_cache/
+test_questions.md
+
+# Virtual environments and uv
+.venv
+.python-version
+uv.lock

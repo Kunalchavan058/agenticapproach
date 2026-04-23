@@ -6,34 +6,56 @@ Run with: uv run streamlit run app.py
 
 import streamlit as st
 import pandas as pd
+import re
+from pathlib import Path
 from rag import ask_with_metadata as normal_rag
 from agentic_rag import ask_with_metadata as agentic_rag
 from responses import ask_with_metadata as responses_rag
 
-# --- Test Questions ---
-TEST_QUESTIONS = {
-    "Simple": [
-        "What is the total revenue of Apollo Hospitals for FY 2024-25?",
-        "Who is the CEO of IndiGo Airlines?",
-        "What dividend did Oracle Financial Services declare for FY 2024-25?",
-    ],
-    "Medium": [
-        "Compare the revenue and net profit of Apollo Hospitals and IndiGo Airlines for FY 2024-25.",
-        "What are the key risks mentioned in the Data Patterns and KPEL annual reports?",
-        "Summarize the CSR activities of Indigo Paints and Apollo Hospitals.",
-    ],
-    "Hard (Exposes RAG Limitations)": [
-        "Compare the revenue, net profit, total assets, debt-to-equity ratio, and employee count across all six companies — Apollo Hospitals, Data Patterns, IndiGo Airlines, Indigo Paints, KPEL, and Oracle Financial Services — for FY 2024-25. Also summarize each company's key risks, future outlook, and dividend policy.",
-        "What are the board composition details, committee structures, CSR spending, related party transactions, and auditor observations for each of the six companies?",
-        "Summarize the management discussion and analysis section of all six companies, including industry outlook, segment-wise revenue breakdown, capital expenditure plans, and operational challenges.",
-        "List all the legal proceedings, contingent liabilities, and regulatory compliance issues mentioned across all six annual reports, along with the financial impact of each.",
-    ],
-    "Edge Cases": [
-        "What is the market cap of Tesla?",
-        "How did COVID-19 impact all six companies?",
-    ],
+
+CATEGORY_INDEX_MAP = {
+    "aragque": "aragdoc",
 }
 
+
+def get_index_name_for_category(category: str) -> str:
+    """Return the Azure Search index to use for the selected question category."""
+    return CATEGORY_INDEX_MAP.get(category, "annual-reports-index")
+
+def load_test_questions(file_path: str) -> dict:
+    """Dynamically load questions from test_questions.md."""
+    questions = {}
+    current_category = "General"
+    
+    if not Path(file_path).exists():
+        return {"Default": ["No questions found in test_questions.md"]}
+
+    with open(file_path, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    # Split by categories (## headers)
+    sections = re.split(r'^##\s+', content, flags=re.MULTILINE)
+    
+    for section in sections:
+        if not section.strip():
+            continue
+            
+        lines = section.strip().split("\n")
+        category_name = lines[0].strip()
+        
+        # Look for numbered questions (e.g., 1. Question or 1) Question)
+        # Using a regex that handles both single line and multiline questions
+        category_content = "\n".join(lines[1:])
+        raw_questions = re.split(r'^\d+[\.\)]\s*', category_content, flags=re.MULTILINE)
+        
+        parsed_questions = [q.strip() for q in raw_questions if q.strip()]
+        if parsed_questions:
+            questions[category_name] = parsed_questions
+            
+    return questions if questions else {"Default": ["No questions parsed"]}
+
+# --- Test Questions ---
+TEST_QUESTIONS = load_test_questions("test_questions.md")
 
 # ============================================================
 # Streamlit UI
@@ -42,10 +64,10 @@ st.set_page_config(page_title="RAG vs Agentic RAG", layout="wide")
 st.title("RAG vs Agentic RAG vs Responses API")
 
 
-def run_strategy(strategy_name: str, runner, question: str) -> dict:
+def run_strategy(strategy_name: str, runner, question: str, index_name: str) -> dict:
     """Run a strategy and convert runtime failures into UI-friendly results."""
     try:
-        result = runner(question)
+        result = runner(question, index_name=index_name)
     except Exception as exc:
         return {
             "answer": (
@@ -97,8 +119,10 @@ with st.sidebar:
             st.rerun()
 
 active_question = custom.strip() if custom.strip() else question
+active_index_name = get_index_name_for_category(category)
 
 st.markdown(f"**Question:** {active_question}")
+st.caption(f"Using search index: {active_index_name}")
 
 if run_btn:
     rag_result = None
@@ -108,15 +132,15 @@ if run_btn:
     # Run the selected mode(s)
     if run_mode in ["Compare All", "Normal RAG only"]:
         with st.spinner("Running Normal RAG..."):
-            rag_result = run_strategy("Normal RAG", normal_rag, active_question)
+            rag_result = run_strategy("Normal RAG", normal_rag, active_question, active_index_name)
 
     if run_mode in ["Compare All", "Agentic RAG only"]:
         with st.spinner("Running Agentic RAG (agent is thinking & searching)..."):
-            agent_result = run_strategy("Agentic RAG", agentic_rag, active_question)
+            agent_result = run_strategy("Agentic RAG", agentic_rag, active_question, active_index_name)
 
     if run_mode in ["Compare All", "Responses API only"]:
         with st.spinner("Running Responses API RAG..."):
-            responses_result = run_strategy("Responses API RAG", responses_rag, active_question)
+            responses_result = run_strategy("Responses API RAG", responses_rag, active_question, active_index_name)
 
     # Save to per-question cache (overrides any previous run for this question)
     st.session_state["results_cache"][active_question] = {

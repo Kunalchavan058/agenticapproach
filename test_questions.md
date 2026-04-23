@@ -19,3 +19,24 @@
 ## Edge Cases
 11. What is the market cap of Tesla? (not in any document — should say "not found")
 12. How did COVID-19 impact all six companies? (might not be in FY 2024-25 reports)
+
+## aragque
+13. You are analyzing a disability benefits case file for Julia Neumann. The case includes multiple documents from different sources (employer, medical provider, legal counsel, personal statement, and phone notes).
+   
+    Please provide a comprehensive case analysis by extracting specific information from the relevant documents:
+
+    1) *Employment History & Status*: What is Julia Neumann's employment timeline, current position, workload percentage, and any accommodations made by her employer? (Focus on employer-related documents)
+
+    2) *Medical Diagnosis & Severity*: What is the specific medical diagnosis, current disability rating (DoD), clinical findings, and medical recommendations regarding work capacity? (Focus on medical documentation)
+
+    3) *Legal Case Information*: What is the case number, assigned legal counsel, current status of proceedings, and any legal recommendations? (Focus on legal/procedural documents)
+
+    4) *Financial & Personal Circumstances*: What is Julia's monthly income, family situation (marital status, children), and how does her condition impact her personal and family life? (Focus on personal statements and communications)
+
+    5) *Symptom Timeline & Daily Impact*: When are symptoms most severe during the day, what specific activities are affected, and how has the condition progressed over time? (Focus on documents describing daily experiences)
+
+    6) *Cross-Document Date Verification*: Create a timeline of all key dates mentioned across documents (employment start, case filing, document submissions, etc.) and identify any date discrepancies.
+
+    7) *Support Network & Next Steps*: What support has been provided (employer, medical, legal), what documentation is pending, and what are the recommended next actions? (Synthesize information from multiple sources)
+
+    For each point, clearly indicate which specific document(s) contain the information and note if information is missing or contradictory across sources.

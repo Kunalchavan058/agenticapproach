@@ -27,7 +27,7 @@ EMBEDDING_ENDPOINT = os.environ.get("AZURE_OPENAI_EMBEDDING_ENDPOINT", OPENAI_EN
 EMBEDDING_KEY = os.environ.get("AZURE_OPENAI_EMBEDDING_KEY", OPENAI_KEY)
 EMBEDDING_MODEL = os.environ.get("AZURE_OPENAI_EMBEDDING_DEPLOYMENT", os.environ["AZURE_AI_EMBEDDING_MODEL"])
 CHAT_MODEL = os.environ["AZURE_AI_MODEL_DEPLOYMENT_NAME"]
-INDEX_NAME = "annual-reports-index"
+DEFAULT_INDEX_NAME = "annual-reports-index"
 
 # --- Clients ---
 _chat_client = AzureOpenAI(
@@ -42,9 +42,13 @@ _embedding_client = AzureOpenAI(
     api_version="2024-12-01-preview",
 )
 
-_search_client = SearchClient(
-    SEARCH_ENDPOINT, INDEX_NAME, AzureKeyCredential(SEARCH_KEY)
-)
+
+
+def _get_search_client(index_name: str) -> SearchClient:
+    """Create a search client for the requested index."""
+    return SearchClient(
+        SEARCH_ENDPOINT, index_name, AzureKeyCredential(SEARCH_KEY)
+    )
 
 
 def _embed(text: str) -> list[float]:
@@ -60,10 +64,16 @@ def _embed(text: str) -> list[float]:
         ) from exc
 
 
-def search_documents(query: str, top_k: int = 10, source_filter: str | None = None) -> str:
+def search_documents(
+    query: str,
+    top_k: int = 10,
+    source_filter: str | None = None,
+    index_name: str = DEFAULT_INDEX_NAME,
+) -> str:
     """Search the document index using hybrid search (keyword + vector)."""
     _t0 = time.time()
     try:
+        search_client = _get_search_client(index_name)
         query_embedding = _embed(query)
 
         vector_query = VectorizedQuery(
@@ -76,7 +86,7 @@ def search_documents(query: str, top_k: int = 10, source_filter: str | None = No
         if source_filter:
             filter_expr = f"source_file eq '{source_filter}'"
 
-        results = _search_client.search(
+        results = search_client.search(
             search_text=query,
             vector_queries=[vector_query],
             top=top_k,
@@ -95,6 +105,7 @@ def search_documents(query: str, top_k: int = 10, source_filter: str | None = No
 
         _tool_call_log.append({
             "query": query,
+            "index_name": index_name,
             "source_filter": source_filter,
             "results_count": len(output_parts),
             "sources": sources[:5],
@@ -106,7 +117,7 @@ def search_documents(query: str, top_k: int = 10, source_filter: str | None = No
 
         return "\n\n---\n\n".join(output_parts)
     except Exception as e:
-        _tool_call_log.append({"query": query, "error": str(e), "duration": round(time.time() - _t0, 2)})
+        _tool_call_log.append({"query": query, "index_name": index_name, "error": str(e), "duration": round(time.time() - _t0, 2)})
         return f"Search error: {e}"
 
 
@@ -164,7 +175,7 @@ AGENT_INSTRUCTIONS = (
 )
 
 
-def _run_agentic_rag(query: str) -> dict:
+def _run_agentic_rag(query: str, index_name: str = DEFAULT_INDEX_NAME) -> dict:
     """Run agentic RAG with OpenAI tool calling loop."""
     global _tool_call_log
     _tool_call_log = []
@@ -191,6 +202,7 @@ def _run_agentic_rag(query: str) -> dict:
             messages.append(choice.message)
             for tool_call in choice.message.tool_calls:
                 args = json.loads(tool_call.function.arguments)
+                args.setdefault("index_name", index_name)
                 result = search_documents(**args)
                 messages.append({
                     "role": "tool",
@@ -218,9 +230,9 @@ def _run_agentic_rag(query: str) -> dict:
     }
 
 
-def ask_with_metadata(query: str) -> dict:
+def ask_with_metadata(query: str, index_name: str = DEFAULT_INDEX_NAME) -> dict:
     """Run agentic RAG, returning answer + metadata."""
-    return _run_agentic_rag(query)
+    return _run_agentic_rag(query, index_name=index_name)
 
 
 def main():
