@@ -8,6 +8,8 @@ the Responses API until the model returns a final answer.
 import json
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from threading import Lock
 
 from azure.core.credentials import AzureKeyCredential
 from azure.search.documents import SearchClient
@@ -30,6 +32,7 @@ CHAT_MODEL = os.environ.get("AZURE_OPENAI_RESPONSES_DEPLOYMENT", os.environ["AZU
 DEFAULT_INDEX_NAME = "annual-reports-index"
 TOP_K = 8
 MAX_TOOL_ROUNDS = 8
+MAX_PARALLEL_SEARCHES = 4
 
 AGENT_INSTRUCTIONS = (
     "You are a general-purpose document analysis assistant with access to a search tool over indexed documents.\n\n"
@@ -83,6 +86,8 @@ TOOLS = [
 ]
 
 _tool_call_log: list[dict] = []
+_tool_call_log_lock = Lock()
+_tool_round_durations: list[float] = []
 
 
 def get_responses_client() -> AzureOpenAI:
@@ -155,29 +160,31 @@ def search_documents(
             )
             sources.append(f"{result['source_file']} (p.{result['page_number']})")
 
-        _tool_call_log.append(
-            {
-                "query": query,
-                "source_filter": source_filter,
-                "results_count": len(output_parts),
-                "sources": sources[:5],
-                "duration": round(time.time() - started, 2),
-            }
-        )
+        with _tool_call_log_lock:
+            _tool_call_log.append(
+                {
+                    "query": query,
+                    "source_filter": source_filter,
+                    "results_count": len(output_parts),
+                    "sources": sources[:5],
+                    "duration": round(time.time() - started, 2),
+                }
+            )
 
         if not output_parts:
             return "No results found for this query."
 
         return "\n\n---\n\n".join(output_parts)
     except Exception as exc:
-        _tool_call_log.append(
-            {
-                "query": query,
-                "source_filter": source_filter,
-                "error": str(exc),
-                "duration": round(time.time() - started, 2),
-            }
-        )
+        with _tool_call_log_lock:
+            _tool_call_log.append(
+                {
+                    "query": query,
+                    "source_filter": source_filter,
+                    "error": str(exc),
+                    "duration": round(time.time() - started, 2),
+                }
+            )
         return f"Search error: {exc}"
 
 
@@ -220,10 +227,49 @@ def ask(query: str, index_name: str = DEFAULT_INDEX_NAME) -> str:
     return result["answer"]
 
 
+def _execute_function_call(tool_call, search_client: SearchClient, embedding_client: AzureOpenAI) -> dict:
+    """Execute one Responses API function call."""
+    args = json.loads(tool_call.arguments)
+    result = search_documents(
+        search_client,
+        embedding_client,
+        query=args["query"],
+        top_k=args["top_k"],
+        source_filter=args["source_filter"],
+    )
+    return {
+        "type": "function_call_output",
+        "call_id": tool_call.call_id,
+        "output": result,
+    }
+
+
+def _run_parallel_function_calls(function_calls, search_client: SearchClient, embedding_client: AzureOpenAI) -> list[dict]:
+    """Execute one round of independent Responses API function calls concurrently."""
+    started = time.time()
+    ordered_outputs: list[dict | None] = [None] * len(function_calls)
+
+    if len(function_calls) == 1:
+        ordered_outputs[0] = _execute_function_call(function_calls[0], search_client, embedding_client)
+    else:
+        max_workers = min(len(function_calls), MAX_PARALLEL_SEARCHES)
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_map = {
+                executor.submit(_execute_function_call, tool_call, search_client, embedding_client): position
+                for position, tool_call in enumerate(function_calls)
+            }
+            for future in as_completed(future_map):
+                ordered_outputs[future_map[future]] = future.result()
+
+    _tool_round_durations.append(round(time.time() - started, 2))
+    return [output for output in ordered_outputs if output is not None]
+
+
 def ask_with_metadata(query: str, index_name: str = DEFAULT_INDEX_NAME) -> dict:
     """Run native Responses tool-calling RAG and return answer + metadata."""
-    global _tool_call_log
+    global _tool_call_log, _tool_round_durations
     _tool_call_log = []
+    _tool_round_durations = []
 
     started = time.time()
     embedding_client = get_embedding_client()
@@ -254,24 +300,7 @@ def ask_with_metadata(query: str, index_name: str = DEFAULT_INDEX_NAME) -> dict:
             break
 
         input_items.extend(response.output)
-        tool_outputs = []
-        for tool_call in function_calls:
-            args = json.loads(tool_call.arguments)
-            result = search_documents(
-                search_client,
-                embedding_client,
-                query=args["query"],
-                top_k=args["top_k"],
-                source_filter=args["source_filter"],
-            )
-            tool_outputs.append(
-                {
-                    "type": "function_call_output",
-                    "call_id": tool_call.call_id,
-                    "output": result,
-                }
-            )
-
+        tool_outputs = _run_parallel_function_calls(function_calls, search_client, embedding_client)
         input_items.extend(tool_outputs)
         tool_rounds += 1
 
@@ -288,7 +317,7 @@ def ask_with_metadata(query: str, index_name: str = DEFAULT_INDEX_NAME) -> dict:
                 seen_sources.add(source)
                 sources.append(source)
 
-    search_time = round(sum(call.get("duration", 0) for call in _tool_call_log), 2)
+    search_time = round(sum(_tool_round_durations), 2)
     generation_time = round(max(total_time - search_time, 0), 2)
     chunks_retrieved = sum(call.get("results_count", 0) for call in _tool_call_log)
 

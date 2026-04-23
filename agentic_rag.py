@@ -9,6 +9,8 @@ and synthesize a complete answer from all retrieved information.
 import json
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from threading import Lock
 
 from azure.core.credentials import AzureKeyCredential
 from azure.search.documents import SearchClient
@@ -28,7 +30,9 @@ EMBEDDING_KEY = os.environ.get("AZURE_OPENAI_EMBEDDING_KEY", OPENAI_KEY)
 EMBEDDING_MODEL = os.environ.get("AZURE_OPENAI_EMBEDDING_DEPLOYMENT", os.environ["AZURE_AI_EMBEDDING_MODEL"])
 CHAT_MODEL = os.environ["AZURE_AI_MODEL_DEPLOYMENT_NAME"]
 DEFAULT_INDEX_NAME = "annual-reports-index"
+TOP_K = 8
 MAX_TOOL_ROUNDS = 8
+MAX_PARALLEL_SEARCHES = 4
 
 # --- Clients ---
 _chat_client = AzureOpenAI(
@@ -67,19 +71,20 @@ def _embed(text: str) -> list[float]:
 
 def search_documents(
     query: str,
-    top_k: int = 10,
+    top_k: int = TOP_K,
     source_filter: str | None = None,
     index_name: str = DEFAULT_INDEX_NAME,
 ) -> str:
     """Search the document index using hybrid search (keyword + vector)."""
     _t0 = time.time()
     try:
+        safe_top_k = max(1, min(int(top_k), TOP_K))
         search_client = _get_search_client(index_name)
         query_embedding = _embed(query)
 
         vector_query = VectorizedQuery(
             vector=query_embedding,
-            k_nearest_neighbors=top_k,
+            k_nearest_neighbors=safe_top_k,
             fields="embedding",
         )
 
@@ -90,7 +95,7 @@ def search_documents(
         results = search_client.search(
             search_text=query,
             vector_queries=[vector_query],
-            top=top_k,
+            top=safe_top_k,
             filter=filter_expr,
             select=["content", "source_file", "page_number"],
         )
@@ -104,26 +109,30 @@ def search_documents(
             )
             sources.append(f"{result['source_file']} (p.{result['page_number']})")
 
-        _tool_call_log.append({
-            "query": query,
-            "index_name": index_name,
-            "source_filter": source_filter,
-            "results_count": len(output_parts),
-            "sources": sources[:5],
-            "duration": round(time.time() - _t0, 2),
-        })
+        with _tool_call_log_lock:
+            _tool_call_log.append({
+                "query": query,
+                "index_name": index_name,
+                "source_filter": source_filter,
+                "results_count": len(output_parts),
+                "sources": sources[:5],
+                "duration": round(time.time() - _t0, 2),
+            })
 
         if not output_parts:
             return "No results found for this query."
 
         return "\n\n---\n\n".join(output_parts)
     except Exception as e:
-        _tool_call_log.append({"query": query, "index_name": index_name, "error": str(e), "duration": round(time.time() - _t0, 2)})
+        with _tool_call_log_lock:
+            _tool_call_log.append({"query": query, "index_name": index_name, "error": str(e), "duration": round(time.time() - _t0, 2)})
         return f"Search error: {e}"
 
 
 # Track tool calls for external consumers (e.g. the UI)
 _tool_call_log: list[dict] = []
+_tool_call_log_lock = Lock()
+_tool_round_durations: list[float] = []
 
 # Tool definition for OpenAI function calling
 TOOLS = [{
@@ -146,8 +155,8 @@ TOOLS = [{
                 },
                 "top_k": {
                     "type": "integer",
-                    "description": "Number of results to return (1-20)",
-                    "default": 10,
+                    "description": "Number of results to return (1-8)",
+                    "default": 8,
                 },
                 "source_filter": {
                     "type": "string",
@@ -181,10 +190,39 @@ AGENT_INSTRUCTIONS = (
 )
 
 
+def _execute_tool_call(tool_call, index_name: str) -> tuple[str, str]:
+    """Execute one search tool call and return the tool id with its output."""
+    args = json.loads(tool_call.function.arguments)
+    args.setdefault("index_name", index_name)
+    return tool_call.id, search_documents(**args)
+
+
+def _run_parallel_tool_calls(tool_calls, index_name: str) -> list[tuple[str, str]]:
+    """Execute one round of independent tool calls concurrently while preserving order."""
+    started = time.time()
+    ordered_results: list[tuple[str, str] | None] = [None] * len(tool_calls)
+
+    if len(tool_calls) == 1:
+        ordered_results[0] = _execute_tool_call(tool_calls[0], index_name)
+    else:
+        max_workers = min(len(tool_calls), MAX_PARALLEL_SEARCHES)
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_map = {
+                executor.submit(_execute_tool_call, tool_call, index_name): position
+                for position, tool_call in enumerate(tool_calls)
+            }
+            for future in as_completed(future_map):
+                ordered_results[future_map[future]] = future.result()
+
+    _tool_round_durations.append(round(time.time() - started, 2))
+    return [result for result in ordered_results if result is not None]
+
+
 def _run_agentic_rag(query: str, index_name: str = DEFAULT_INDEX_NAME) -> dict:
     """Run agentic RAG with OpenAI tool calling loop."""
-    global _tool_call_log
+    global _tool_call_log, _tool_round_durations
     _tool_call_log = []
+    _tool_round_durations = []
 
     start = time.time()
 
@@ -208,13 +246,10 @@ def _run_agentic_rag(query: str, index_name: str = DEFAULT_INDEX_NAME) -> dict:
         if choice.message.tool_calls:
             # Append the assistant message with tool calls
             messages.append(choice.message)
-            for tool_call in choice.message.tool_calls:
-                args = json.loads(tool_call.function.arguments)
-                args.setdefault("index_name", index_name)
-                result = search_documents(**args)
+            for tool_call_id, result in _run_parallel_tool_calls(choice.message.tool_calls, index_name):
                 messages.append({
                     "role": "tool",
-                    "tool_call_id": tool_call.id,
+                    "tool_call_id": tool_call_id,
                     "content": result,
                 })
             tool_rounds += 1
@@ -231,8 +266,8 @@ def _run_agentic_rag(query: str, index_name: str = DEFAULT_INDEX_NAME) -> dict:
 
     total_time = time.time() - start
     total_chunks = sum(tc.get("results_count", 0) for tc in _tool_call_log)
-    search_time = round(sum(tc.get("duration", 0) for tc in _tool_call_log), 2)
-    generation_time = round(total_time - search_time, 2)
+    search_time = round(sum(_tool_round_durations), 2)
+    generation_time = round(max(total_time - search_time, 0), 2)
 
     return {
         "answer": answer,
