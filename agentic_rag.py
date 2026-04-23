@@ -14,7 +14,7 @@ from azure.core.credentials import AzureKeyCredential
 from azure.search.documents import SearchClient
 from azure.search.documents.models import VectorizedQuery
 from dotenv import load_dotenv
-from openai import AzureOpenAI
+from openai import AzureOpenAI, NotFoundError
 
 load_dotenv(override=False)
 
@@ -23,14 +23,22 @@ SEARCH_ENDPOINT = os.environ["AZURE_AI_SEARCH_ENDPOINT"]
 SEARCH_KEY = os.environ["AZURE_AI_SEARCH_KEY"]
 OPENAI_ENDPOINT = os.environ["AZURE_OPENAI_ENDPOINT"]
 OPENAI_KEY = os.environ["AZURE_OPENAI_KEY"]
-EMBEDDING_MODEL = os.environ["AZURE_AI_EMBEDDING_MODEL"]
+EMBEDDING_ENDPOINT = os.environ.get("AZURE_OPENAI_EMBEDDING_ENDPOINT", OPENAI_ENDPOINT)
+EMBEDDING_KEY = os.environ.get("AZURE_OPENAI_EMBEDDING_KEY", OPENAI_KEY)
+EMBEDDING_MODEL = os.environ.get("AZURE_OPENAI_EMBEDDING_DEPLOYMENT", os.environ["AZURE_AI_EMBEDDING_MODEL"])
 CHAT_MODEL = os.environ["AZURE_AI_MODEL_DEPLOYMENT_NAME"]
 INDEX_NAME = "annual-reports-index"
 
 # --- Clients ---
-_openai_client = AzureOpenAI(
+_chat_client = AzureOpenAI(
     azure_endpoint=OPENAI_ENDPOINT,
     api_key=OPENAI_KEY,
+    api_version="2024-12-01-preview",
+)
+
+_embedding_client = AzureOpenAI(
+    azure_endpoint=EMBEDDING_ENDPOINT,
+    api_key=EMBEDDING_KEY,
     api_version="2024-12-01-preview",
 )
 
@@ -41,12 +49,19 @@ _search_client = SearchClient(
 
 def _embed(text: str) -> list[float]:
     """Generate embedding for a single text."""
-    response = _openai_client.embeddings.create(input=[text], model=EMBEDDING_MODEL)
-    return response.data[0].embedding
+    try:
+        response = _embedding_client.embeddings.create(input=[text], model=EMBEDDING_MODEL)
+        return response.data[0].embedding
+    except NotFoundError as exc:
+        raise RuntimeError(
+            "Embedding deployment not found. Configure AZURE_OPENAI_EMBEDDING_DEPLOYMENT "
+            "and optionally AZURE_OPENAI_EMBEDDING_ENDPOINT / AZURE_OPENAI_EMBEDDING_KEY "
+            f"for the deployment that serves embeddings. Current embedding deployment: {EMBEDDING_MODEL}"
+        ) from exc
 
 
-def search_annual_reports(query: str, top_k: int = 10, source_filter: str | None = None) -> str:
-    """Search the annual reports index using hybrid search (keyword + vector)."""
+def search_documents(query: str, top_k: int = 10, source_filter: str | None = None) -> str:
+    """Search the document index using hybrid search (keyword + vector)."""
     _t0 = time.time()
     try:
         query_embedding = _embed(query)
@@ -102,13 +117,13 @@ _tool_call_log: list[dict] = []
 TOOLS = [{
     "type": "function",
     "function": {
-        "name": "search_annual_reports",
+        "name": "search_documents",
         "description": (
-            "Search the annual reports index using hybrid search (keyword + vector). "
-            "Use this tool to find specific information from company annual reports. "
+            "Search the indexed documents using hybrid search (keyword + vector). "
+            "Use this tool to find specific information from the available documents. "
             "You can call this multiple times with different queries to gather all needed information. "
             "Use targeted, specific queries for best results. "
-            "Use source_filter to narrow results to a specific company file."
+            "Use source_filter to narrow results to a specific source file when the exact file name is known."
         ),
         "parameters": {
             "type": "object",
@@ -124,7 +139,7 @@ TOOLS = [{
                 },
                 "source_filter": {
                     "type": "string",
-                    "description": "Optional: exact source file name to filter (e.g., 'Apollo_Hospitals_Delhi_Annual_Report_2024-25.pdf')",
+                    "description": "Optional: exact source file name to narrow the search to a single document.",
                 },
             },
             "required": ["query"],
@@ -133,29 +148,19 @@ TOOLS = [{
 }]
 
 AGENT_INSTRUCTIONS = (
-    "You are an expert financial analyst assistant with access to annual reports "
-    "from six Indian listed companies for FY 2024-25.\n\n"
-    "AVAILABLE SOURCE FILES:\n"
-    "- Apollo_Hospitals_Delhi_Annual_Report_2024-25.pdf\n"
-    "- Data_Patterns_Annual_Report_2024-25.pdf\n"
-    "- IndiGo_Airlines_Annual_Report_2024-25.pdf\n"
-    "- Indigo_Paints_Annual_Report_2024-25.pdf\n"
-    "- KPEL_Annual_Report_2024-25.pdf\n"
-    "- Oracle_Financial_Services_Annual_Report_2024-25.pdf\n\n"
+    "You are a general-purpose document analysis assistant with access to a search tool over indexed documents.\n\n"
     "IMPORTANT RULES:\n"
-    "1. ALWAYS use the search_annual_reports tool to find information. NEVER answer from memory.\n"
-    "2. For complex questions involving multiple companies or metrics, break them down and search SEPARATELY "
-    "for each company and each metric. Make multiple targeted searches.\n"
+    "1. ALWAYS use the search_documents tool to find information. NEVER answer from memory.\n"
+    "2. For complex questions, break the task into smaller searches by topic, entity, section, or document as needed.\n"
     "3. If your first search doesn't return enough information, search again with different queries.\n"
-    "4. When comparing companies, search for each company individually using source_filter with the exact file name.\n"
-    "5. When the answer involves numerical data or comparisons, present a markdown table FIRST with all found values, "
-    "then add any additional commentary or analysis below the table.\n"
+    "4. Use source_filter only when you know the exact source file name and want to constrain the search to one document.\n"
+    "5. When the answer involves structured comparisons or numeric values, prefer a markdown table. Otherwise use the format that best fits the request.\n"
     "6. Use numbered references like [1], [2], [3] in the answer text to cite sources. "
     "At the end of your answer, add a 'References' section listing each number with its source file and page "
-    "(e.g., [1] Apollo_Hospitals_Delhi_Annual_Report_2024-25.pdf, Page 61). "
+    "when available. "
     "Do NOT write the full source file name inline in the answer body — only use the number.\n"
     "7. If information is not found after thorough searching, say so explicitly.\n"
-    "8. Do NOT pass source_filter unless you use an exact file name from the list above."
+    "8. Do not claim facts that are not supported by the retrieved context."
 )
 
 
@@ -172,7 +177,7 @@ def _run_agentic_rag(query: str) -> dict:
     ]
 
     while True:
-        response = _openai_client.chat.completions.create(
+        response = _chat_client.chat.completions.create(
             model=CHAT_MODEL,
             messages=messages,
             tools=TOOLS,
@@ -186,7 +191,7 @@ def _run_agentic_rag(query: str) -> dict:
             messages.append(choice.message)
             for tool_call in choice.message.tool_calls:
                 args = json.loads(tool_call.function.arguments)
-                result = search_annual_reports(**args)
+                result = search_documents(**args)
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tool_call.id,
@@ -220,7 +225,7 @@ def ask_with_metadata(query: str) -> dict:
 
 def main():
     print("=== Agentic RAG (Tool Calling) ===")
-    print("Ask questions about the annual reports. Type 'quit' to exit.\n")
+    print("Ask questions about the indexed documents. Type 'quit' to exit.\n")
 
     while True:
         try:

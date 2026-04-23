@@ -8,6 +8,7 @@ import streamlit as st
 import pandas as pd
 from rag import ask_with_metadata as normal_rag
 from agentic_rag import ask_with_metadata as agentic_rag
+from responses import ask_with_metadata as responses_rag
 
 # --- Test Questions ---
 TEST_QUESTIONS = {
@@ -38,7 +39,35 @@ TEST_QUESTIONS = {
 # Streamlit UI
 # ============================================================
 st.set_page_config(page_title="RAG vs Agentic RAG", layout="wide")
-st.title("RAG vs Agentic RAG Comparison")
+st.title("RAG vs Agentic RAG vs Responses API")
+
+
+def run_strategy(strategy_name: str, runner, question: str) -> dict:
+    """Run a strategy and convert runtime failures into UI-friendly results."""
+    try:
+        result = runner(question)
+    except Exception as exc:
+        return {
+            "answer": (
+                f"{strategy_name} could not complete.\n\n"
+                "This is usually a configuration problem with the Azure OpenAI deployment or endpoint.\n\n"
+                f"Error: `{exc}`"
+            ),
+            "chunks_retrieved": 0,
+            "search_calls": 0,
+            "sources": [],
+            "search_time": 0.0,
+            "generation_time": 0.0,
+            "total_time": 0.0,
+            "tool_calls": [],
+            "available": False,
+            "error": str(exc),
+        }
+
+    result.setdefault("tool_calls", [])
+    result.setdefault("sources", [])
+    result.setdefault("available", True)
+    return result
 
 # Per-question results cache: { question_text: { "rag_result": ..., "agent_result": ..., "run_mode": ... } }
 if "results_cache" not in st.session_state:
@@ -52,7 +81,10 @@ with st.sidebar:
     st.divider()
     custom = st.text_area("Or type your own:")
     st.divider()
-    run_mode = st.radio("Run Mode", ["Compare Both", "Normal RAG only", "Agentic RAG only"])
+    run_mode = st.radio(
+        "Run Mode",
+        ["Compare All", "Normal RAG only", "Agentic RAG only", "Responses API only"],
+    )
     run_btn = st.button("Run", type="primary", use_container_width=True)
 
     # Show how many questions have cached results
@@ -71,20 +103,26 @@ st.markdown(f"**Question:** {active_question}")
 if run_btn:
     rag_result = None
     agent_result = None
+    responses_result = None
 
     # Run the selected mode(s)
-    if run_mode in ["Compare Both", "Normal RAG only"]:
+    if run_mode in ["Compare All", "Normal RAG only"]:
         with st.spinner("Running Normal RAG..."):
-            rag_result = normal_rag(active_question)
+            rag_result = run_strategy("Normal RAG", normal_rag, active_question)
 
-    if run_mode in ["Compare Both", "Agentic RAG only"]:
+    if run_mode in ["Compare All", "Agentic RAG only"]:
         with st.spinner("Running Agentic RAG (agent is thinking & searching)..."):
-            agent_result = agentic_rag(active_question)
+            agent_result = run_strategy("Agentic RAG", agentic_rag, active_question)
+
+    if run_mode in ["Compare All", "Responses API only"]:
+        with st.spinner("Running Responses API RAG..."):
+            responses_result = run_strategy("Responses API RAG", responses_rag, active_question)
 
     # Save to per-question cache (overrides any previous run for this question)
     st.session_state["results_cache"][active_question] = {
         "rag_result": rag_result,
         "agent_result": agent_result,
+        "responses_result": responses_result,
         "run_mode": run_mode,
     }
 
@@ -92,18 +130,21 @@ if run_btn:
 cached = st.session_state["results_cache"].get(active_question, {})
 rag_result = cached.get("rag_result")
 agent_result = cached.get("agent_result")
+responses_result = cached.get("responses_result")
 run_mode = cached.get("run_mode")
 
 if cached:
     st.caption("Showing cached results. Click **Run** to re-run.")
 
-if rag_result or agent_result:
+if rag_result or agent_result or responses_result:
     # --- Tabs ---
     tab_names = []
     if rag_result:
         tab_names.append("Normal RAG Answer")
     if agent_result:
         tab_names.append("Agentic RAG Answer")
+    if responses_result:
+        tab_names.append("Responses API Answer")
     tab_names.append("Analytics & Comparison")
 
     tabs = st.tabs(tab_names)
@@ -112,6 +153,8 @@ if rag_result or agent_result:
     # --- Normal RAG Answer Tab ---
     if rag_result:
         with tabs[tab_idx]:
+            if rag_result.get("available") is False and rag_result.get("error"):
+                st.warning(rag_result["error"])
             st.markdown(rag_result["answer"])
             with st.expander("Sources Used"):
                 for src in rag_result["sources"]:
@@ -121,6 +164,8 @@ if rag_result or agent_result:
     # --- Agentic RAG Answer Tab ---
     if agent_result:
         with tabs[tab_idx]:
+            if agent_result.get("available") is False and agent_result.get("error"):
+                st.warning(agent_result["error"])
             st.markdown(agent_result["answer"])
             with st.expander(f"Agent Tool Calls ({agent_result['search_calls']} searches)"):
                 for i, tc in enumerate(agent_result["tool_calls"], 1):
@@ -133,9 +178,100 @@ if rag_result or agent_result:
                     st.divider()
         tab_idx += 1
 
+    # --- Responses API Answer Tab ---
+    if responses_result:
+        with tabs[tab_idx]:
+            if responses_result.get("available") is False and responses_result.get("error"):
+                st.warning(responses_result["error"])
+            st.markdown(responses_result["answer"])
+            with st.expander("Sources Used"):
+                for src in responses_result["sources"]:
+                    st.write(f"- {src}")
+        tab_idx += 1
+
     # --- Analytics Tab ---
     with tabs[tab_idx]:
-        if rag_result and agent_result:
+        if rag_result and agent_result and responses_result:
+            st.subheader("Performance Comparison")
+
+            comparison_df = pd.DataFrame({
+                "Metric": [
+                    "Search Calls",
+                    "Chunks Retrieved",
+                    "Search Time",
+                    "Generation Time",
+                    "Total Time",
+                ],
+                "Normal RAG": [
+                    rag_result["search_calls"],
+                    rag_result["chunks_retrieved"],
+                    f"{rag_result['search_time']}s",
+                    f"{rag_result['generation_time']}s",
+                    f"{rag_result['total_time']}s",
+                ],
+                "Agentic RAG": [
+                    agent_result["search_calls"],
+                    agent_result["chunks_retrieved"],
+                    f"{agent_result['search_time']}s",
+                    f"{agent_result['generation_time']}s",
+                    f"{agent_result['total_time']}s",
+                ],
+                "Responses API": [
+                    responses_result["search_calls"],
+                    responses_result["chunks_retrieved"],
+                    f"{responses_result['search_time']}s",
+                    f"{responses_result['generation_time']}s",
+                    f"{responses_result['total_time']}s",
+                ],
+            })
+
+            st.dataframe(
+                comparison_df,
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            st.divider()
+
+            st.subheader("Agent Search Queries")
+            if agent_result["tool_calls"]:
+                tool_rows = []
+                for i, tc in enumerate(agent_result["tool_calls"], 1):
+                    tool_rows.append({
+                        "#": i,
+                        "Query": tc.get("query", "N/A"),
+                        "Source Filter": tc.get("source_filter") or "—",
+                        "Results": tc.get("results_count", 0),
+                    })
+                st.dataframe(
+                    pd.DataFrame(tool_rows),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+            else:
+                st.write("No tool calls recorded.")
+
+            st.divider()
+
+            st.subheader("Normal RAG Sources")
+            source_rows = [{"#": i, "Source": src} for i, src in enumerate(rag_result["sources"], 1)]
+            st.dataframe(
+                pd.DataFrame(source_rows),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            st.divider()
+
+            st.subheader("Responses API Sources")
+            response_source_rows = [{"#": i, "Source": src} for i, src in enumerate(responses_result["sources"], 1)]
+            st.dataframe(
+                pd.DataFrame(response_source_rows),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+        elif rag_result and agent_result:
             # --- Comparison Table ---
             st.subheader("Performance Comparison")
 
@@ -215,6 +351,18 @@ if rag_result or agent_result:
                 use_container_width=True,
                 hide_index=True,
             )
+
+        elif responses_result:
+            st.subheader("Responses API Metrics")
+            metrics_df = pd.DataFrame({
+                "Metric": ["Chunks Retrieved", "Search Calls", "Total Time"],
+                "Value": [responses_result["chunks_retrieved"], responses_result["search_calls"], f"{responses_result['total_time']}s"],
+            })
+            st.dataframe(metrics_df, use_container_width=True, hide_index=True)
+            st.divider()
+            st.subheader("Sources")
+            response_source_rows = [{"#": i, "Source": src} for i, src in enumerate(responses_result["sources"], 1)]
+            st.dataframe(pd.DataFrame(response_source_rows), use_container_width=True, hide_index=True)
 
         elif rag_result:
             st.subheader("Normal RAG Metrics")

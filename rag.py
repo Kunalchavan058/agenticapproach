@@ -1,17 +1,17 @@
 """
-RAG script: Ask questions over the annual reports search index.
+RAG script: Ask questions over the document search index.
 
 Uses hybrid search (keyword + vector) to retrieve relevant chunks,
-then sends them as context to gpt-5.4 for answer generation.
+then sends them as context to the chat model for answer generation.
 """
 
 import os
 
 from azure.core.credentials import AzureKeyCredential
 from azure.search.documents import SearchClient
-from azure.search.documents.models import VectorizableTextQuery, VectorizedQuery
+from azure.search.documents.models import VectorizedQuery
 from dotenv import load_dotenv
-from openai import AzureOpenAI
+from openai import AzureOpenAI, NotFoundError
 
 load_dotenv()
 
@@ -20,15 +20,17 @@ SEARCH_ENDPOINT = os.environ["AZURE_AI_SEARCH_ENDPOINT"]
 SEARCH_KEY = os.environ["AZURE_AI_SEARCH_KEY"]
 OPENAI_ENDPOINT = os.environ["AZURE_OPENAI_ENDPOINT"]
 OPENAI_KEY = os.environ["AZURE_OPENAI_KEY"]
-EMBEDDING_MODEL = os.environ["AZURE_AI_EMBEDDING_MODEL"]
+EMBEDDING_ENDPOINT = os.environ.get("AZURE_OPENAI_EMBEDDING_ENDPOINT", OPENAI_ENDPOINT)
+EMBEDDING_KEY = os.environ.get("AZURE_OPENAI_EMBEDDING_KEY", OPENAI_KEY)
+EMBEDDING_MODEL = os.environ.get("AZURE_OPENAI_EMBEDDING_DEPLOYMENT", os.environ["AZURE_AI_EMBEDDING_MODEL"])
 CHAT_MODEL = os.environ["AZURE_AI_MODEL_DEPLOYMENT_NAME"]
 
 INDEX_NAME = "annual-reports-index"
 TOP_K = 15 # number of chunks to retrieve
 
 
-def get_openai_client() -> AzureOpenAI:
-    """Create an Azure OpenAI client using API key."""
+def get_chat_client() -> AzureOpenAI:
+    """Create an Azure OpenAI client for chat generation."""
     return AzureOpenAI(
         azure_endpoint=OPENAI_ENDPOINT,
         api_key=OPENAI_KEY,
@@ -36,10 +38,26 @@ def get_openai_client() -> AzureOpenAI:
     )
 
 
+def get_embedding_client() -> AzureOpenAI:
+    """Create an Azure OpenAI client for embedding generation."""
+    return AzureOpenAI(
+        azure_endpoint=EMBEDDING_ENDPOINT,
+        api_key=EMBEDDING_KEY,
+        api_version="2024-12-01-preview",
+    )
+
+
 def embed_query(client: AzureOpenAI, query: str) -> list[float]:
     """Generate embedding for the user query."""
-    response = client.embeddings.create(input=[query], model=EMBEDDING_MODEL)
-    return response.data[0].embedding
+    try:
+        response = client.embeddings.create(input=[query], model=EMBEDDING_MODEL)
+        return response.data[0].embedding
+    except NotFoundError as exc:
+        raise RuntimeError(
+            "Embedding deployment not found. Configure AZURE_OPENAI_EMBEDDING_DEPLOYMENT "
+            "and optionally AZURE_OPENAI_EMBEDDING_ENDPOINT / AZURE_OPENAI_EMBEDDING_KEY "
+            f"for the deployment that serves embeddings. Current embedding deployment: {EMBEDDING_MODEL}"
+        ) from exc
 
 
 def hybrid_search(search_client: SearchClient, openai_client: AzureOpenAI, query: str) -> list[dict]:
@@ -82,17 +100,16 @@ def build_prompt(query: str, chunks: list[dict]) -> list[dict]:
     context_text = "\n\n---\n\n".join(context_parts)
 
     system_message = (
-        "You are a helpful financial analyst assistant. Answer the user's question "
-        "based ONLY on the provided context from annual reports. "
-        "If the context doesn't contain enough information to answer, say so clearly.\n\n"
+        "You are a helpful document analysis assistant. Answer the user's question "
+        "based ONLY on the provided context from the indexed documents. "
+        "If the context does not contain enough information, say so clearly.\n\n"
         "RESPONSE FORMAT:\n"
-        "- When the answer involves numerical data or comparisons, present a markdown table FIRST with all found values.\n"
-        "- After the table, add any additional commentary or analysis.\n\n"
+        "- Choose the structure that best fits the question: table for comparisons or structured data, bullets for lists, prose for explanations.\n"
+        "- Keep the answer grounded in the retrieved context and avoid unsupported assumptions.\n\n"
         "CITATION FORMAT:\n"
         "- Use numbered references like [1], [2], [3] in the answer text to cite sources.\n"
-        "- At the end of your answer, add a 'References' section listing each number with its source file and page.\n"
-        "- Example: [1] Apollo_Hospitals_Delhi_Annual_Report_2024-25.pdf, Page 61\n"
-        "- Do NOT write the full source file name inline in the answer body — only use the number."
+        "- At the end of your answer, add a 'References' section listing each number with its source file and page when available.\n"
+        "- Do NOT write the full source file name inline in the answer body; use the reference number instead."
     )
 
     user_message = f"Context:\n{context_text}\n\n---\n\nQuestion: {query}"
@@ -114,13 +131,14 @@ def ask_with_metadata(query: str) -> dict:
     import time
     start = time.time()
 
-    openai_client = get_openai_client()
+    embedding_client = get_embedding_client()
+    chat_client = get_chat_client()
     search_client = SearchClient(
         SEARCH_ENDPOINT, INDEX_NAME, AzureKeyCredential(SEARCH_KEY)
     )
 
     # 1. Retrieve relevant chunks
-    chunks = hybrid_search(search_client, openai_client, query)
+    chunks = hybrid_search(search_client, embedding_client, query)
     search_time = time.time() - start
 
     # 2. Build prompt with context
@@ -128,7 +146,7 @@ def ask_with_metadata(query: str) -> dict:
 
     # 3. Generate answer
     gen_start = time.time()
-    response = openai_client.chat.completions.create(
+    response = chat_client.chat.completions.create(
         model=CHAT_MODEL,
         messages=messages,
         temperature=0.3,
@@ -148,8 +166,8 @@ def ask_with_metadata(query: str) -> dict:
 
 
 def main():
-    print("=== Annual Reports RAG ===")
-    print("Ask questions about the annual reports. Type 'quit' to exit.\n")
+    print("=== Document RAG ===")
+    print("Ask questions about the indexed documents. Type 'quit' to exit.\n")
 
     while True:
         query = input("You: ").strip()

@@ -40,7 +40,9 @@ DOC_INTEL_ENDPOINT = os.environ["AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT"]
 DOC_INTEL_KEY = os.environ["AZURE_DOCUMENT_INTELLIGENCE_KEY"]
 OPENAI_ENDPOINT = os.environ["AZURE_OPENAI_ENDPOINT"]
 OPENAI_KEY = os.environ["AZURE_OPENAI_KEY"]
-EMBEDDING_MODEL = os.environ["AZURE_AI_EMBEDDING_MODEL"]
+EMBEDDING_ENDPOINT = os.environ.get("AZURE_OPENAI_EMBEDDING_ENDPOINT", OPENAI_ENDPOINT)
+EMBEDDING_KEY = os.environ.get("AZURE_OPENAI_EMBEDDING_KEY", OPENAI_KEY)
+EMBEDDING_MODEL = os.environ.get("AZURE_OPENAI_EMBEDDING_DEPLOYMENT", os.environ["AZURE_AI_EMBEDDING_MODEL"])
 
 INDEX_NAME = "annual-reports-index"
 PDF_DIR = Path("pdfs")
@@ -56,8 +58,8 @@ TEST_SINGLE_PDF = None
 def get_embedding_client() -> AzureOpenAI:
     """Create an Azure OpenAI client using API key."""
     return AzureOpenAI(
-        azure_endpoint=OPENAI_ENDPOINT,
-        api_key=OPENAI_KEY,
+        azure_endpoint=EMBEDDING_ENDPOINT,
+        api_key=EMBEDDING_KEY,
         api_version="2024-12-01-preview",
     )
 
