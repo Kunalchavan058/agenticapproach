@@ -11,8 +11,9 @@
 6. Summarize the CSR activities of Indigo Paints and Apollo Hospitals.
 
 ## Hard — Exposes RAG Limitations (20-30+ chunks needed)
-7. Compare the revenue, net profit, total assets, debt-to-equity ratio, and employee count across all six companies — Apollo Hospitals, Data Patterns, IndiGo Airlines, Indigo Paints, KPEL, and Oracle Financial Services — for FY 2024-25. Also summarize each company's key risks, future outlook, and dividend policy.
-8. What are the board composition details, committee structures, CSR spending, related party transactions, and auditor observations for each of the six companies?
+7. Compare the revenue, net profit, total assets, debt-to-equity ratio, and across all six companies — Apollo Hospitals, Data Patterns, IndiGo Airlines, Indigo Paints, KPEL, and Oracle Financial Services — for FY 2024-25. Also summarize each company's key risks, future outlook, and dividend policy.
+8. **Structured Analysis:** Create a comparative financial and strategic analysis table for FY 2024-25 for Apollo Hospitals, Data Patterns, IndiGo Airlines, Indigo Paints, KPEL, and Oracle Financial Services. For each company, extract precisely these values from their Consolidated Financial Statements: Revenue from Operations (in ₹ Cr), Net Profit / Profit After Tax (in ₹ Cr), Total Assets (as of March 31, 2025), Debt-to-Equity Ratio, and Total Employee Count. Additionally, summarize in bullet points: Key Risks, Future Outlook, and Dividend Policy/Declared.
+9. What are the board composition details, committee structures, CSR spending, related party transactions, and auditor observations for each of the six companies?
 9. Summarize the management discussion and analysis section of all six companies, including industry outlook, segment-wise revenue breakdown, capital expenditure plans, and operational challenges.
 10. List all the legal proceedings, contingent liabilities, and regulatory compliance issues mentioned across all six annual reports, along with the financial impact of each.
 

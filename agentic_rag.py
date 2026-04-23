@@ -33,6 +33,7 @@ DEFAULT_INDEX_NAME = "annual-reports-index"
 TOP_K = 8
 MAX_TOOL_ROUNDS = 8
 MAX_PARALLEL_SEARCHES = 4
+MAX_STALLED_ROUNDS = 2
 
 # --- Clients ---
 _chat_client = AzureOpenAI(
@@ -172,22 +173,62 @@ AGENT_INSTRUCTIONS = (
     "You are a general-purpose document analysis assistant with access to a search tool over indexed documents.\n\n"
     "PLAN-AND-EXECUTE POLICY:\n"
     "1. ALWAYS use the search_documents tool to find information. NEVER answer from memory.\n"
-    "2. For every non-trivial question, first decompose it into smaller factual tasks internally before deciding on tool calls.\n"
-    "3. Prefer a short plan with atomic tasks such as entities, attributes, time periods, sections, or comparison dimensions.\n"
-    "4. If multiple tasks are independent, issue multiple search_documents tool calls in the SAME turn so they can run in parallel.\n"
-    "5. Use follow-up searches only for unresolved gaps after reviewing previous tool results. Avoid redundant searches.\n"
-    "6. Use source_filter only when you know the exact source file name and want to constrain the search to one document.\n"
-    "7. Keep search queries targeted and specific. Do not send one broad query when several narrower queries would retrieve better evidence.\n"
-    "8. Do not reveal your hidden reasoning or internal plan. Execute it through efficient tool usage and then return the final answer.\n\n"
+    "2. For every non-trivial question, first decompose it internally into a compact task ledger of the exact information needs, such as entities, attributes, constraints, sections, time ranges, or comparison dimensions.\n"
+    "3. When the request has multiple parts, internally track each task as resolved, unresolved, or unsupported. Treat partial completion as incomplete.\n"
+    "4. For broad or complex documents, plan retrieval in stages: first locate the most relevant section, table, or passage cluster; then extract the exact facts needed from that area.\n"
+    "5. Group related tasks that can likely be answered from the same evidence, but split tasks apart when a targeted search will improve precision.\n"
+    "6. If multiple tasks are independent, issue multiple search_documents tool calls in the SAME turn so they can run in parallel.\n"
+    "7. After every tool round, compare the evidence collected so far against the task ledger and identify the smallest set of remaining gaps. Use the next round only for those gaps.\n"
+    "8. Use source_filter only when you know the exact source file name and want to constrain the search to one document.\n"
+    "9. Keep search queries targeted and information-dense. Prefer queries that combine the subject, the needed attribute, and any important constraint or scope.\n"
+    "10. On large documents, prefer smart navigation over brute force. Use broad locator searches to find the right region, then focused searches to extract missing details.\n"
+    "11. If a follow-up search is substantially similar to a previous one and did not add useful evidence, do not keep repeating it. Try a meaningfully different angle or mark the item as not found if needed.\n"
+    "12. Before giving the final answer, verify that every requested sub-question has either a supported answer or an explicit not found outcome after targeted searching.\n"
+    "13. Do not reveal your hidden reasoning or internal plan. Execute it through efficient tool usage and then return the final answer.\n\n"
     "ANSWER RULES:\n"
     "1. When the answer involves structured comparisons or numeric values, prefer a markdown table. Otherwise use the format that best fits the request.\n"
     "2. Use numbered references like [1], [2], [3] in the answer text to cite sources. "
     "At the end of your answer, add a 'References' section listing each number with its source file and page "
     "when available. Do NOT write the full source file name inline in the answer body — only use the number.\n"
-    "3. If information is not found after thorough searching, say so explicitly.\n"
-    "4. Do not stop after partial coverage if the user asked for multiple items.\n"
-    "5. Do not claim facts that are not supported by the retrieved context."
+    "3. If information is not found after thorough searching, say so explicitly and identify which requested item was not found.\n"
+    "4. For multi-entity or multi-metric requests, ensure the final answer covers every requested row and column from the user's ask.\n"
+    "5. Answer only the question that was asked. Do not add extra metrics, extra columns, extra sections, or related facts unless the user explicitly requested them.\n"
+    "6. Do not estimate, infer, back-calculate, or approximate missing values. If a requested value is not supported by retrieved evidence, mark it as not found.\n"
+    "7. Preserve the user's requested schema as closely as possible. If the user named specific fields, use only those fields in the final table or structure.\n"
+    "8. Do not claim facts that are not supported by the retrieved context."
 )
+
+
+def _tool_call_signature(tool_call, index_name: str) -> tuple[tuple[str, str | int | None], ...]:
+    """Build a stable signature for one tool call so repeated rounds can be detected."""
+    args = json.loads(tool_call.function.arguments)
+    args.setdefault("index_name", index_name)
+    normalized = {
+        "index_name": args.get("index_name"),
+        "query": args.get("query"),
+        "source_filter": args.get("source_filter"),
+        "top_k": args.get("top_k", TOP_K),
+    }
+    return tuple(sorted(normalized.items()))
+
+
+def _generate_final_answer(messages: list[dict]) -> str:
+    """Force a final answer using only the evidence collected so far."""
+    final_messages = list(messages)
+    final_messages.append({
+        "role": "system",
+        "content": (
+            "Produce the final answer using only the evidence already retrieved. "
+            "Answer only the user's requested fields. Do not add extra columns, extra metrics, or derived values. "
+            "If a requested item is unsupported, mark it as not found instead of estimating it."
+        ),
+    })
+    response = _chat_client.chat.completions.create(
+        model=CHAT_MODEL,
+        messages=final_messages,
+        temperature=0.2,
+    )
+    return response.choices[0].message.content or "No answer generated."
 
 
 def _execute_tool_call(tool_call, index_name: str) -> tuple[str, str]:
@@ -230,9 +271,12 @@ def _run_agentic_rag(query: str, index_name: str = DEFAULT_INDEX_NAME) -> dict:
         {"role": "system", "content": AGENT_INSTRUCTIONS},
         {"role": "user", "content": query},
     ]
+    answer = ""
     tool_rounds = 0
+    stalled_rounds = 0
+    previous_round_signatures: tuple[tuple[tuple[str, str | int | None], ...], ...] | None = None
 
-    while tool_rounds <= MAX_TOOL_ROUNDS:
+    while tool_rounds < MAX_TOOL_ROUNDS:
         response = _chat_client.chat.completions.create(
             model=CHAT_MODEL,
             messages=messages,
@@ -246,23 +290,56 @@ def _run_agentic_rag(query: str, index_name: str = DEFAULT_INDEX_NAME) -> dict:
         if choice.message.tool_calls:
             # Append the assistant message with tool calls
             messages.append(choice.message)
+            current_round_signatures = tuple(
+                _tool_call_signature(tool_call, index_name) for tool_call in choice.message.tool_calls
+            )
+            round_started_at = len(_tool_call_log)
             for tool_call_id, result in _run_parallel_tool_calls(choice.message.tool_calls, index_name):
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tool_call_id,
                     "content": result,
                 })
+
+            round_logs = _tool_call_log[round_started_at:]
+            round_chunks = sum(log.get("results_count", 0) for log in round_logs)
+            is_repeated_round = current_round_signatures == previous_round_signatures
+
+            if is_repeated_round or round_chunks == 0:
+                stalled_rounds += 1
+            else:
+                stalled_rounds = 0
+
+            previous_round_signatures = current_round_signatures
             tool_rounds += 1
+
+            if stalled_rounds >= MAX_STALLED_ROUNDS:
+                messages.append({
+                    "role": "system",
+                    "content": (
+                        "Search progress has stalled. Do not call tools again. "
+                        "Produce the best final answer from the evidence already gathered, and explicitly "
+                        "mark unresolved items as not found after searching. Do not add any fields or metrics "
+                        "that were not explicitly requested by the user."
+                    ),
+                })
+                answer = _generate_final_answer(messages)
+                break
         else:
             # Final text response
             answer = choice.message.content or ""
             break
 
-    if tool_rounds > MAX_TOOL_ROUNDS:
-        answer = (
-            "The agent exceeded the configured tool-call limit before reaching a final answer.\n\n"
-            "Try a narrower question, or increase MAX_TOOL_ROUNDS in agentic_rag.py."
-        )
+    if not answer:
+        messages.append({
+            "role": "system",
+            "content": (
+                "You have reached the tool-use budget. Produce the best final answer from the evidence already "
+                "retrieved. Explicitly mark anything still unresolved as not found after searching. Do not add "
+                "extra fields, extra metrics, or derived values beyond the user's request."
+            ),
+        })
+        answer = _generate_final_answer(messages)
 
     total_time = time.time() - start
     total_chunks = sum(tc.get("results_count", 0) for tc in _tool_call_log)

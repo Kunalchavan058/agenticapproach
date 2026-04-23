@@ -40,8 +40,8 @@ EMBEDDING_MODEL = os.environ.get("AZURE_OPENAI_EMBEDDING_DEPLOYMENT", os.environ
 INDEX_NAME = "aragdoc"
 PDF_DIR = Path("aragdoc")
 CACHE_DIR = Path("doc_intel_cache")
-CHUNK_SIZE = 1000
-CHUNK_OVERLAP = 200
+CHUNK_SIZE = 2500
+CHUNK_OVERLAP = 300
 EMBEDDING_DIMENSIONS = 3072  # text-embedding-3-large
 
 def get_embedding_client() -> AzureOpenAI:
@@ -79,7 +79,7 @@ def extract_text_from_pdf(pdf_path: Path) -> list[dict]:
 
     with open(pdf_path, "rb") as f:
         poller = client.begin_analyze_document(
-            "prebuilt-read",
+            "prebuilt-layout",
             body=f,
         )
 
