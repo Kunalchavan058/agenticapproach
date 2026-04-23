@@ -28,6 +28,7 @@ EMBEDDING_KEY = os.environ.get("AZURE_OPENAI_EMBEDDING_KEY", OPENAI_KEY)
 EMBEDDING_MODEL = os.environ.get("AZURE_OPENAI_EMBEDDING_DEPLOYMENT", os.environ["AZURE_AI_EMBEDDING_MODEL"])
 CHAT_MODEL = os.environ["AZURE_AI_MODEL_DEPLOYMENT_NAME"]
 DEFAULT_INDEX_NAME = "annual-reports-index"
+MAX_TOOL_ROUNDS = 8
 
 # --- Clients ---
 _chat_client = AzureOpenAI(
@@ -160,18 +161,23 @@ TOOLS = [{
 
 AGENT_INSTRUCTIONS = (
     "You are a general-purpose document analysis assistant with access to a search tool over indexed documents.\n\n"
-    "IMPORTANT RULES:\n"
+    "PLAN-AND-EXECUTE POLICY:\n"
     "1. ALWAYS use the search_documents tool to find information. NEVER answer from memory.\n"
-    "2. For complex questions, break the task into smaller searches by topic, entity, section, or document as needed.\n"
-    "3. If your first search doesn't return enough information, search again with different queries.\n"
-    "4. Use source_filter only when you know the exact source file name and want to constrain the search to one document.\n"
-    "5. When the answer involves structured comparisons or numeric values, prefer a markdown table. Otherwise use the format that best fits the request.\n"
-    "6. Use numbered references like [1], [2], [3] in the answer text to cite sources. "
+    "2. For every non-trivial question, first decompose it into smaller factual tasks internally before deciding on tool calls.\n"
+    "3. Prefer a short plan with atomic tasks such as entities, attributes, time periods, sections, or comparison dimensions.\n"
+    "4. If multiple tasks are independent, issue multiple search_documents tool calls in the SAME turn so they can run in parallel.\n"
+    "5. Use follow-up searches only for unresolved gaps after reviewing previous tool results. Avoid redundant searches.\n"
+    "6. Use source_filter only when you know the exact source file name and want to constrain the search to one document.\n"
+    "7. Keep search queries targeted and specific. Do not send one broad query when several narrower queries would retrieve better evidence.\n"
+    "8. Do not reveal your hidden reasoning or internal plan. Execute it through efficient tool usage and then return the final answer.\n\n"
+    "ANSWER RULES:\n"
+    "1. When the answer involves structured comparisons or numeric values, prefer a markdown table. Otherwise use the format that best fits the request.\n"
+    "2. Use numbered references like [1], [2], [3] in the answer text to cite sources. "
     "At the end of your answer, add a 'References' section listing each number with its source file and page "
-    "when available. "
-    "Do NOT write the full source file name inline in the answer body — only use the number.\n"
-    "7. If information is not found after thorough searching, say so explicitly.\n"
-    "8. Do not claim facts that are not supported by the retrieved context."
+    "when available. Do NOT write the full source file name inline in the answer body — only use the number.\n"
+    "3. If information is not found after thorough searching, say so explicitly.\n"
+    "4. Do not stop after partial coverage if the user asked for multiple items.\n"
+    "5. Do not claim facts that are not supported by the retrieved context."
 )
 
 
@@ -186,12 +192,14 @@ def _run_agentic_rag(query: str, index_name: str = DEFAULT_INDEX_NAME) -> dict:
         {"role": "system", "content": AGENT_INSTRUCTIONS},
         {"role": "user", "content": query},
     ]
+    tool_rounds = 0
 
-    while True:
+    while tool_rounds <= MAX_TOOL_ROUNDS:
         response = _chat_client.chat.completions.create(
             model=CHAT_MODEL,
             messages=messages,
             tools=TOOLS,
+            parallel_tool_calls=True,
             temperature=0.3,
         )
 
@@ -209,10 +217,17 @@ def _run_agentic_rag(query: str, index_name: str = DEFAULT_INDEX_NAME) -> dict:
                     "tool_call_id": tool_call.id,
                     "content": result,
                 })
+            tool_rounds += 1
         else:
             # Final text response
             answer = choice.message.content or ""
             break
+
+    if tool_rounds > MAX_TOOL_ROUNDS:
+        answer = (
+            "The agent exceeded the configured tool-call limit before reaching a final answer.\n\n"
+            "Try a narrower question, or increase MAX_TOOL_ROUNDS in agentic_rag.py."
+        )
 
     total_time = time.time() - start
     total_chunks = sum(tc.get("results_count", 0) for tc in _tool_call_log)
