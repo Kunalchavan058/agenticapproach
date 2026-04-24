@@ -323,6 +323,7 @@ def ask_with_metadata(query: str, index_name: str = DEFAULT_INDEX_NAME) -> dict:
     response = None
     tool_rounds = 0
     stalled_rounds = 0
+    llm_calls = 0
     previous_signatures = None
 
     while tool_rounds < MAX_TOOL_ROUNDS:
@@ -335,6 +336,7 @@ def ask_with_metadata(query: str, index_name: str = DEFAULT_INDEX_NAME) -> dict:
             temperature=0.3,
             parallel_tool_calls=True,
         )
+        llm_calls += 1
 
         function_calls = [
             item for item in getattr(response, "output", []) or []
@@ -367,6 +369,7 @@ def ask_with_metadata(query: str, index_name: str = DEFAULT_INDEX_NAME) -> dict:
     
     # If we exited due to no more calls or budget/stalls, do a final synthesis
     answer = _generate_final_answer(responses_client, input_items)
+    llm_calls += 1
     
     if not answer:
         answer = "No answer generated."
@@ -393,6 +396,7 @@ def ask_with_metadata(query: str, index_name: str = DEFAULT_INDEX_NAME) -> dict:
         "answer": answer,
         "chunks_retrieved": chunks_retrieved,
         "search_calls": len(_tool_call_log),
+        "llm_calls": llm_calls,
         "sources": sources,
         "search_time": search_time,
         "generation_time": generation_time,

@@ -1,5 +1,5 @@
 """
-RAG script: Ask questions over the document search index.
+RAG script: ask questions over the document search index.
 
 Uses hybrid search (keyword + vector) to retrieve relevant chunks,
 then sends them as context to the chat model for answer generation.
@@ -158,6 +158,7 @@ def ask_with_metadata(query: str, index_name: str = DEFAULT_INDEX_NAME) -> dict:
         "answer": response.choices[0].message.content,
         "chunks_retrieved": len(chunks),
         "search_calls": 1,
+        "llm_calls": 1,
         "sources": [f"{c['source_file']} (p.{c['page_number']})" for c in chunks],
         "search_time": round(search_time, 2),
         "generation_time": round(gen_time, 2),

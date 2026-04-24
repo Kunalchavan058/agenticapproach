@@ -274,6 +274,7 @@ def _run_agentic_rag(query: str, index_name: str = DEFAULT_INDEX_NAME) -> dict:
     answer = ""
     tool_rounds = 0
     stalled_rounds = 0
+    llm_calls = 0
     previous_round_signatures: tuple[tuple[tuple[str, str | int | None], ...], ...] | None = None
 
     while tool_rounds < MAX_TOOL_ROUNDS:
@@ -284,6 +285,7 @@ def _run_agentic_rag(query: str, index_name: str = DEFAULT_INDEX_NAME) -> dict:
             parallel_tool_calls=True,
             temperature=0.3,
         )
+        llm_calls += 1
 
         choice = response.choices[0]
 
@@ -324,6 +326,7 @@ def _run_agentic_rag(query: str, index_name: str = DEFAULT_INDEX_NAME) -> dict:
                     ),
                 })
                 answer = _generate_final_answer(messages)
+                llm_calls += 1
                 break
         else:
             # Final text response
@@ -340,6 +343,7 @@ def _run_agentic_rag(query: str, index_name: str = DEFAULT_INDEX_NAME) -> dict:
             ),
         })
         answer = _generate_final_answer(messages)
+        llm_calls += 1
 
     total_time = time.time() - start
     total_chunks = sum(tc.get("results_count", 0) for tc in _tool_call_log)
@@ -350,6 +354,7 @@ def _run_agentic_rag(query: str, index_name: str = DEFAULT_INDEX_NAME) -> dict:
         "answer": answer,
         "chunks_retrieved": total_chunks,
         "search_calls": len(_tool_call_log),
+        "llm_calls": llm_calls,
         "tool_calls": list(_tool_call_log),
         "search_time": search_time,
         "generation_time": generation_time,
