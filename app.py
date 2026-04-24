@@ -287,7 +287,7 @@ if rag_result or agent_result or orchestrated_result or responses_result:
             if orchestrated_result.get("available") is False and orchestrated_result.get("error"):
                 st.warning(orchestrated_result["error"])
             st.markdown(orchestrated_result["answer"])
-            if orchestrated_result["plan_rounds"]:
+            if orchestrated_result.get("plan_rounds"):
                 with st.expander("Planner / Reviewer Analysis"):
                     for round_info in orchestrated_result["plan_rounds"]:
                         st.markdown(f"**Round {round_info['round']}:** {round_info['plan_summary']}")

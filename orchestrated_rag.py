@@ -38,7 +38,7 @@ DEFAULT_INDEX_NAME = "annual-reports-index"
 TOP_K = 8
 MAX_PLAN_TASKS = 4
 MAX_EXECUTOR_ROUNDS = 2
-MAX_PARALLEL_EXECUTORS = 4
+MAX_PARALLEL_EXECUTORS = 10
 
 PLANNER_INSTRUCTIONS = (
     "You are the planner brain for a document-analysis system with a search tool over indexed documents. "
